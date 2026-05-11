@@ -3,88 +3,80 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
-const morgan = require('morgan');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
-// ===== CORS - бүх origin зөвшөөрөх =====
+// ─── Security headers ─────────────────────────────────────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: false,
+}));
+
+// ─── CORS — зөвшөөрөгдсөн origin-ууд ─────────────────────────────────────────
 const allowedOrigins = [
   process.env.CLIENT_URL,
   process.env.ADMIN_URL,
   'http://localhost:3000',
   'http://localhost:3001',
-];
+].filter(Boolean);
 
 app.use(cors({
-  origin: function (origin, callback) {
-    // origin байхгүй бол (Postman, direct call) зөвшөөрнө
-    if (!origin) return callback(null, true);
-    // vercel.app domain бүгд зөвшөөрнө
-    if (origin.endsWith('.vercel.app') || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    // development дээр бүгд зөвшөөрнө
-    if (process.env.NODE_ENV !== 'production') {
-      return callback(null, true);
-    }
-    callback(null, true); // production дээр ч зөвшөөрнө (нээлттэй API)
+  origin: (origin, cb) => {
+    // Allow no-origin (mobile, curl, etc) or whitelisted
+    if (!origin || allowedOrigins.some(o => origin.startsWith(o))) return cb(null, true);
+    cb(new Error('CORS: Origin зөвшөөрөгдөөгүй — ' + origin));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  exposedHeaders: ['Content-Disposition'],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
 }));
 
-// OPTIONS preflight бүгдийг зөвшөөрнө
-app.options('*', cors());
-
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-  crossOriginOpenerPolicy: false,
-}));
 app.use(compression());
-if (process.env.NODE_ENV !== 'production') app.use(morgan('dev'));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// ===== Health check =====
+// ─── Trust proxy (Vercel) ─────────────────────────────────────────────────────
+app.set('trust proxy', 1);
+
+// ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  message: 'МонтоТрейд Cargo API v1.0',
-  time: new Date().toISOString(),
-  db: process.env.DATABASE_URL ? 'configured' : 'not configured',
+  name: 'МонтоТрейд Cargo API',
+  version: '2.0.0',
+  db: process.env.DATABASE_URL ? '✅ connected' : '⚠️ not configured',
 }));
+
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
-// ===== Routes =====
+// ─── Routes ───────────────────────────────────────────────────────────────────
 if (process.env.DATABASE_URL) {
   try {
-    const routes = require('./routes');
-    app.use('/api', routes);
-    console.log('✅ Routes loaded');
+    app.use('/api', require('./routes'));
+    console.log('✅ API routes loaded');
   } catch (err) {
-    console.error('Route error:', err.message);
+    console.error('❌ Route load error:', err.message);
+    app.use('/api', (req, res) => res.status(503).json({ message: 'Server error' }));
   }
 } else {
-  app.use('/api', (req, res) => {
-    res.status(503).json({ message: 'DATABASE_URL тохируулагдаагүй байна. Vercel environment variables дээр нэмнэ үү.' });
-  });
+  app.use('/api', (req, res) => res.status(503).json({
+    message: 'DATABASE_URL тохируулагдаагүй байна. Vercel environment variables-д нэмнэ үү.',
+  }));
 }
 
-// ===== 404 handler =====
-app.use((req, res) => {
-  res.status(404).json({ message: `Route not found: ${req.method} ${req.path}` });
-});
+// ─── 404 ──────────────────────────────────────────────────────────────────────
+app.use((req, res) => res.status(404).json({ message: 'Endpoint олдсонгүй' }));
 
-// ===== Error handler =====
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(err.status || 500).json({
-    message: err.message || 'Серверийн алдаа',
-    ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
+// ─── Global error handler ─────────────────────────────────────────────────────
+app.use((err, req, res, _next) => {
+  // Don't leak stack traces to client
+  console.error('❌ Error:', err.stack);
+  const status = err.status || 500;
+  res.status(status).json({
+    message: status === 500 ? 'Серверийн алдаа гарлаа' : err.message,
   });
 });
 
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
 module.exports = app;

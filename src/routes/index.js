@@ -100,3 +100,50 @@ router.patch('/deliveries/:id/delivered', auth, requireRole('admin', 'delivery')
 });
 
 module.exports = router;
+    res.status(500).json({ message: err.message }); }
+});
+
+router.delete('/permissions', requireRole('admin'), async (req, res) => {
+  try {
+    const pool = require('../config/db');
+    const { role, permission } = req.body;
+    if (role === 'admin') return res.status(400).json({ message: 'admin эрхийг өөрчлөх боломжгүй' });
+    await pool.query('DELETE FROM role_permissions WHERE role=$1 AND permission=$2', [role, permission]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// ─── Parcels ──────────────────────────────────────────────────────────────────
+router.get('/parcels',           requirePermission('parcels.view'),   getParcels);
+router.get('/parcels/export',    requireRole('admin'),                  exportExcel);
+router.get('/parcels/:id',       requirePermission('parcels.view'),   getOne);
+router.post('/parcels',          requirePermission('parcels.create'), createParcel);
+router.put('/parcels/:id',       requirePermission('parcels.edit'),   updateParcel);
+router.patch('/parcels/:id/status', requirePermission('parcels.edit'), updateStatus);
+router.delete('/parcels/:id',    requireRole('admin'),                  removeParcel);
+
+// ─── Batches ──────────────────────────────────────────────────────────────────
+router.get('/batches',           requirePermission('batches.view'),   getBatches);
+router.get('/batches/:id',       requirePermission('batches.view'),   getBatch);
+router.post('/batches',          requirePermission('batches.create'), createBatch);
+router.put('/batches/:id',       requirePermission('batches.edit'),   updateBatch);
+router.patch('/batches/:id/status', requirePermission('batches.edit'), updateBatchStatus);
+router.post('/batches/:id/parcels', requirePermission('batches.edit'), addParcels);
+router.delete('/batches/:id',    requireRole('admin'),                  removeBatch);
+
+// ─── Deliveries ───────────────────────────────────────────────────────────────
+router.get('/deliveries',                  requirePermission('deliveries.manage'), getDeliveries);
+router.patch('/deliveries/:id/delivered',  requirePermission('deliveries.manage'), markDelivered);
+
+// ─── Reports (admin only) ─────────────────────────────────────────────────────
+router.get('/reports/summary',    requireRole('admin'), summary);
+router.get('/reports/status',     requireRole('admin'), byStatus);
+router.get('/reports/cargo-type', requireRole('admin'), byCargoType);
+router.get('/reports/monthly',    requireRole('admin'), monthly);
+router.get('/reports/warehouse',  requireRole('admin'), warehouse);
+
+// ─── Payments ─────────────────────────────────────────────────────────────────
+router.post('/payments/invoice',  createInvoice);
+router.get('/payments/check/:id', checkPayment);
+
+module.exports = router;
