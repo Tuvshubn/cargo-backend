@@ -1,149 +1,80 @@
+
 const express = require('express');
-const { login, me } = require('../controllers/auth.controller');
-const { getAll: getUsers, create: createUser, update: updateUser, remove: removeUser } = require('../controllers/users.controller');
-const { getAll: getParcels, getOne, track, create: createParcel, update: updateParcel, updateStatus, remove: removeParcel, exportExcel } = require('../controllers/parcels.controller');
-const { getAll: getBatches, getOne: getBatch, create: createBatch, update: updateBatch, updateStatus: updateBatchStatus, addParcels, remove: removeBatch } = require('../controllers/batches.controller');
-const { summary, byStatus, byCargoType, monthly, warehouse, uncollectedKorea } = require('../controllers/reports.controller');
-const { createInvoice, checkPayment, callback } = require('../controllers/payments.controller');
-const { auth, requireRole } = require('../middleware/auth');
-
+const { auth, requireRole, requirePermission } = require('../middleware/auth');
+const db = require('../config/db');
 const router = express.Router();
+const { login, me } = require('../controllers/auth.controller');
 
-// Auth
+// DB шаардлагатай эсэхийг шалгах
+const needDB = (fn) => async (req, res, next) => {
+  if (!db._hasDB) return res.status(503).json({ message: 'DATABASE_URL тохируулагдаагүй. Vercel environment variables-д нэмнэ үү.' });
+  try { await fn(req, res, next); } catch (err) { next(err); }
+};
+
+const c = (name) => {
+  try { return require('../controllers/' + name + '.controller'); }
+  catch (e) { return { [name]: (req, res) => res.status(501).json({ message: 'Not implemented' }) }; }
+};
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
 router.post('/auth/login', login);
 router.get('/auth/me', auth, me);
 
-// Public tracking
-router.get('/parcels/track', track);
+// ── Parcels ───────────────────────────────────────────────────────────────────
+router.get('/parcels/track', needDB((req, res) => c('parcels').track(req, res)));
+router.get('/parcels/export', auth, requireRole('admin'), needDB((req, res) => c('parcels').exportExcel(req, res)));
+router.get('/parcels', auth, requirePermission('parcels.view'), needDB((req, res) => c('parcels').getAll(req, res)));
+router.get('/parcels/:id', auth, requirePermission('parcels.view'), needDB((req, res) => c('parcels').getOne(req, res)));
+router.post('/parcels', auth, requirePermission('parcels.create'), needDB((req, res) => c('parcels').create(req, res)));
+router.put('/parcels/:id', auth, requirePermission('parcels.edit'), needDB((req, res) => c('parcels').update(req, res)));
+router.patch('/parcels/:id/status', auth, requirePermission('parcels.edit'), needDB((req, res) => c('parcels').updateStatus(req, res)));
+router.delete('/parcels/:id', auth, requireRole('admin'), needDB((req, res) => c('parcels').remove(req, res)));
 
-// Payment callback (public)
-router.post('/payments/callback', callback);
+// ── Batches ───────────────────────────────────────────────────────────────────
+router.get('/batches', auth, requirePermission('batches.view'), needDB((req, res) => c('batches').getAll(req, res)));
+router.get('/batches/:id', auth, requirePermission('batches.view'), needDB((req, res) => c('batches').getOne(req, res)));
+router.post('/batches', auth, requirePermission('batches.create'), needDB((req, res) => c('batches').create(req, res)));
+router.put('/batches/:id', auth, requirePermission('batches.edit'), needDB((req, res) => c('batches').update(req, res)));
+router.patch('/batches/:id/status', auth, requirePermission('batches.edit'), needDB((req, res) => c('batches').updateStatus(req, res)));
+router.post('/batches/:id/parcels', auth, requirePermission('batches.edit'), needDB((req, res) => c('batches').addParcels(req, res)));
+router.delete('/batches/:id', auth, requireRole('admin'), needDB((req, res) => c('batches').remove(req, res)));
 
-// Users (admin only)
-router.get('/users', auth, requireRole('admin'), getUsers);
-router.post('/users', auth, requireRole('admin'), createUser);
-router.put('/users/:id', auth, requireRole('admin'), updateUser);
-router.delete('/users/:id', auth, requireRole('admin'), removeUser);
+// ── Deliveries ────────────────────────────────────────────────────────────────
+router.get('/deliveries', auth, requirePermission('deliveries.manage'), needDB((req, res) => c('deliveries').getDeliveries(req, res)));
+router.patch('/deliveries/:id/delivered', auth, requirePermission('deliveries.manage'), needDB((req, res) => c('deliveries').markDelivered(req, res)));
 
-// Permissions
-router.get('/permissions', auth, requireRole('admin'), async (req, res) => {
-  const pool = require('../config/db');
-  const { rows } = await pool.query('SELECT * FROM role_permissions ORDER BY role, permission');
+// ── Reports ───────────────────────────────────────────────────────────────────
+router.get('/reports/summary', auth, requireRole('admin'), needDB((req, res) => c('reports').summary(req, res)));
+router.get('/reports/status', auth, requireRole('admin'), needDB((req, res) => c('reports').byStatus(req, res)));
+router.get('/reports/cargo-type', auth, requireRole('admin'), needDB((req, res) => c('reports').byCargoType(req, res)));
+router.get('/reports/monthly', auth, requireRole('admin'), needDB((req, res) => c('reports').monthly(req, res)));
+router.get('/reports/warehouse', auth, requireRole('admin'), needDB((req, res) => c('reports').warehouse(req, res)));
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+router.get('/users', auth, requireRole('admin'), needDB((req, res) => c('users').getAll(req, res)));
+router.post('/users', auth, requireRole('admin'), needDB((req, res) => c('users').create(req, res)));
+router.put('/users/:id', auth, requireRole('admin'), needDB((req, res) => c('users').update(req, res)));
+router.delete('/users/:id', auth, requireRole('admin'), needDB((req, res) => c('users').remove(req, res)));
+
+// ── Permissions ───────────────────────────────────────────────────────────────
+router.get('/permissions', auth, requireRole('admin'), needDB(async (req, res) => {
+  const { rows } = await db.query('SELECT * FROM role_permissions ORDER BY role,permission');
   res.json(rows);
-});
-router.post('/permissions', auth, requireRole('admin'), async (req, res) => {
-  const pool = require('../config/db');
+}));
+router.post('/permissions', auth, requireRole('admin'), needDB(async (req, res) => {
   const { role, permission } = req.body;
-  await pool.query('INSERT INTO role_permissions (role, permission) VALUES ($1,$2) ON CONFLICT DO NOTHING', [role, permission]);
+  await db.query('INSERT INTO role_permissions (role,permission) VALUES (\$1,\$2) ON CONFLICT DO NOTHING', [role, permission]);
   res.json({ success: true });
-});
-router.delete('/permissions', auth, requireRole('admin'), async (req, res) => {
-  const pool = require('../config/db');
+}));
+router.delete('/permissions', auth, requireRole('admin'), needDB(async (req, res) => {
   const { role, permission } = req.body;
-  await pool.query('DELETE FROM role_permissions WHERE role=$1 AND permission=$2', [role, permission]);
+  await db.query('DELETE FROM role_permissions WHERE role=\$1 AND permission=\$2', [role, permission]);
   res.json({ success: true });
-});
+}));
 
-// Parcels
-router.get('/parcels', auth, getParcels);
-router.get('/parcels/export', auth, requireRole('admin'), exportExcel);
-router.get('/parcels/:id', auth, getOne);
-router.post('/parcels', auth, requireRole('admin', 'driver'), createParcel);
-router.put('/parcels/:id', auth, requireRole('admin', 'driver'), updateParcel);
-router.patch('/parcels/:id/status', auth, updateStatus);
-router.delete('/parcels/:id', auth, requireRole('admin'), removeParcel);
-
-// Batches
-router.get('/batches', auth, getBatches);
-router.get('/batches/:id', auth, getBatch);
-router.post('/batches', auth, requireRole('admin'), createBatch);
-router.put('/batches/:id', auth, requireRole('admin'), updateBatch);
-router.patch('/batches/:id/status', auth, requireRole('admin'), updateBatchStatus);
-router.post('/batches/:id/parcels', auth, requireRole('admin'), addParcels);
-router.delete('/batches/:id', auth, requireRole('admin'), removeBatch);
-
-// Reports
-router.get('/reports/summary', auth, requireRole('admin'), summary);
-router.get('/reports/status', auth, requireRole('admin'), byStatus);
-router.get('/reports/cargo-type', auth, requireRole('admin'), byCargoType);
-router.get('/reports/monthly', auth, requireRole('admin'), monthly);
-router.get('/reports/warehouse', auth, requireRole('admin'), warehouse);
-router.get('/reports/uncollected-korea', auth, requireRole('admin'), uncollectedKorea);
-
-// Payments
-router.post('/payments/invoice', createInvoice);
-router.get('/payments/check/:invoice_id', checkPayment);
-
-// Delivery driver routes
-router.get('/deliveries', auth, requireRole('admin', 'delivery'), async (req, res) => {
-  const pool = require('../config/db');
-  const where = req.user.role === 'delivery' ? 'WHERE p.delivery_driver_id=$1' : 'WHERE p.status IN (\'warehouse\',\'delivering\')';
-  const params = req.user.role === 'delivery' ? [req.user.id] : [];
-  const { rows } = await pool.query(
-    `SELECT p.*, b.batch_code FROM parcels p LEFT JOIN batches b ON p.batch_id=b.id ${where} ORDER BY p.arrived_at ASC`,
-    params
-  );
-  res.json(rows);
-});
-
-router.patch('/deliveries/:id/delivered', auth, requireRole('admin', 'delivery'), async (req, res) => {
-  const pool = require('../config/db');
-  await pool.query(
-    `UPDATE parcels SET status='delivered', collected_at=NOW(), updated_at=NOW() WHERE id=$1`,
-    [req.params.id]
-  );
-  await pool.query(
-    `INSERT INTO parcel_status_history (parcel_id,status,note,changed_by) VALUES ($1,'delivered','Хүргэгдлээ',$2)`,
-    [req.params.id, req.user.id]
-  );
-  res.json({ success: true });
-});
-
-module.exports = router;
-    res.status(500).json({ message: err.message }); }
-});
-
-router.delete('/permissions', requireRole('admin'), async (req, res) => {
-  try {
-    const pool = require('../config/db');
-    const { role, permission } = req.body;
-    if (role === 'admin') return res.status(400).json({ message: 'admin эрхийг өөрчлөх боломжгүй' });
-    await pool.query('DELETE FROM role_permissions WHERE role=$1 AND permission=$2', [role, permission]);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ─── Parcels ──────────────────────────────────────────────────────────────────
-router.get('/parcels',           requirePermission('parcels.view'),   getParcels);
-router.get('/parcels/export',    requireRole('admin'),                  exportExcel);
-router.get('/parcels/:id',       requirePermission('parcels.view'),   getOne);
-router.post('/parcels',          requirePermission('parcels.create'), createParcel);
-router.put('/parcels/:id',       requirePermission('parcels.edit'),   updateParcel);
-router.patch('/parcels/:id/status', requirePermission('parcels.edit'), updateStatus);
-router.delete('/parcels/:id',    requireRole('admin'),                  removeParcel);
-
-// ─── Batches ──────────────────────────────────────────────────────────────────
-router.get('/batches',           requirePermission('batches.view'),   getBatches);
-router.get('/batches/:id',       requirePermission('batches.view'),   getBatch);
-router.post('/batches',          requirePermission('batches.create'), createBatch);
-router.put('/batches/:id',       requirePermission('batches.edit'),   updateBatch);
-router.patch('/batches/:id/status', requirePermission('batches.edit'), updateBatchStatus);
-router.post('/batches/:id/parcels', requirePermission('batches.edit'), addParcels);
-router.delete('/batches/:id',    requireRole('admin'),                  removeBatch);
-
-// ─── Deliveries ───────────────────────────────────────────────────────────────
-router.get('/deliveries',                  requirePermission('deliveries.manage'), getDeliveries);
-router.patch('/deliveries/:id/delivered',  requirePermission('deliveries.manage'), markDelivered);
-
-// ─── Reports (admin only) ─────────────────────────────────────────────────────
-router.get('/reports/summary',    requireRole('admin'), summary);
-router.get('/reports/status',     requireRole('admin'), byStatus);
-router.get('/reports/cargo-type', requireRole('admin'), byCargoType);
-router.get('/reports/monthly',    requireRole('admin'), monthly);
-router.get('/reports/warehouse',  requireRole('admin'), warehouse);
-
-// ─── Payments ─────────────────────────────────────────────────────────────────
-router.post('/payments/invoice',  createInvoice);
-router.get('/payments/check/:id', checkPayment);
+// ── Payments ──────────────────────────────────────────────────────────────────
+router.post('/payments/callback', needDB((req, res) => c('payments').callback(req, res)));
+router.post('/payments/invoice', auth, needDB((req, res) => c('payments').createInvoice(req, res)));
+router.get('/payments/check/:id', auth, needDB((req, res) => c('payments').checkPayment(req, res)));
 
 module.exports = router;
